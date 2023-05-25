@@ -84,11 +84,13 @@ def aggregate_by_hotel_id(df):
     output = df \
         .groupBy('hotel_id').agg(
         count(when(col('customer_preferences') == 'Short stay', col('hotel_id'))).cast('Integer').alias('Short stay'),
-        count(when(col('customer_preferences') == 'Standard stay', col('hotel_id'))).cast('Integer').alias('Standard stay'),
+        count(when(col('customer_preferences') == 'Standard stay', col('hotel_id'))).cast('Integer').alias(
+            'Standard stay'),
         count(when(col('customer_preferences') == 'Standard extended stay', col('hotel_id'))).cast('Integer').alias(
             'Standard extended stay'),
         count(when(col('customer_preferences') == 'Long stay', col('hotel_id'))).cast('Integer').alias('Long stay'),
-        count(when(col('customer_preferences') == 'Erroneous data', col('hotel_id'))).cast('Integer').alias('Erroneous data'),
+        count(when(col('customer_preferences') == 'Erroneous data', col('hotel_id'))).cast('Integer').alias(
+            'Erroneous data'),
         count(when(col('with_children') != 0, col('hotel_id'))).cast('Integer').alias('with_children')
     )
 
@@ -135,14 +137,11 @@ def write_to_avro(df, epoch_id):
     :param epoch_id: this is the microbatch id that is provided by Spark foreachBatch
     :return: microbatch data is written to avro format
     """
-    avro_path = "../datasets/avro"
     df.write \
         .format("avro") \
         .mode("overwrite") \
-        .save(avro_path)
+        .save("./datasets/hotels_aggregated")
 
 
 maxcol_schema = StructType([StructField('maxval', IntegerType()), StructField('most_popular_stay_type', StringType())])
 maxcol = udf(lambda row: max(row, key=itemgetter(0)), maxcol_schema)
-
-# spark = spark_session()

@@ -1,14 +1,15 @@
-import datetime
-
 import findspark
+
 findspark.init()
 
-from etl.functions import set_condition, add_stay_duration, aggregate_by_hotel_id, \
+from etl.functions import add_stay_duration, aggregate_by_hotel_id, \
     get_most_popular_stay_type, write_to_avro, join_initial, filter_by_temp
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, broadcast
+from pyspark.sql.functions import col, broadcast, concat, lit
 from pyspark.sql.types import *
-
+from elasticsearch import Elasticsearch
+from elasticsearch.helpers import bulk
+import pandas as pd
 
 spark = SparkSession.builder \
     .master("local[*]") \
@@ -93,13 +94,120 @@ joined_all_data = aggregated_df_stream.join(broadcast(aggregated_df),
             )
 
 final_stream_df = get_most_popular_stay_type(joined_all_data)
-query = final_stream_df\
-    .writeStream\
-    .foreachBatch(write_to_avro)\
-    .outputMode(outputMode='complete')\
+query = final_stream_df \
+    .writeStream \
+    .foreachBatch(write_to_avro) \
+    .outputMode(outputMode='complete') \
     .start()
+
+query.awaitTermination(50)
 
 query.processAllAvailable()
 query.stop()
-
 spark.stop()
+
+spark_elastic = SparkSession.builder \
+    .master("local[*]") \
+    .appName('spark-to-elastic') \
+    .config("spark.jars.packages",
+            "org.apache.spark:spark-avro_2.12:3.2.3") \
+    .config("spark.es.nodes", "localhost") \
+    .config("spark.es.port", "9200") \
+    .config("spark.es.index.auto.create", "true") \
+    .config("spark.es.nodes.wan.only", "true") \
+    .config("spark.driver.memory", "15g") \
+    .getOrCreate()
+
+spark_elastic.conf.set("spark.sql.execution.arrow.enabled", "true")
+spark_elastic.sparkContext.setLogLevel("ERROR")
+spark_elastic.conf.set("spark.sql.autoBroadcastJoinThreshold", 104857600)
+
+new_stream_schema = StructType([
+    StructField('hotel_id', StringType(), True),
+    StructField('with_children', LongType(), True),
+    StructField('current_timestamp', StringType(), True),
+    StructField('cnt_erroneous_data', LongType(), True),
+    StructField('cnt_short_stay', LongType(), True),
+    StructField('cnt_standard_stay', LongType(), True),
+    StructField('cnt_standard_extended_stay', LongType(), True),
+    StructField('cnt_long_stay', LongType(), True),
+    StructField('most_popular_stay_type', StringType(), True)
+])
+
+df = spark_elastic.readStream.schema(new_stream_schema).format('avro').load('./datasets/hotels_aggregated')
+df3 = spark_elastic.read.parquet('./datasets/hotel-weather/hotel-weather')
+
+df_with_coords = df.join(broadcast(df3), df.hotel_id == df3.id, how='inner').select(
+    'hotel_id',
+    'with_children',
+    'current_timestamp',
+    'cnt_erroneous_data',
+    'cnt_short_stay',
+    'cnt_standard_stay',
+    'cnt_standard_extended_stay',
+    'cnt_long_stay',
+    'most_popular_stay_type',
+    'latitude',
+    'longitude'
+)
+
+df_with_coords = df_with_coords.withColumn("coords", concat(col("latitude"), lit(", "), col("longitude")))
+df_with_coords = df_with_coords.drop("latitude", "longitude")
+
+
+index = 'elk'
+mappings = {
+    "properties": {
+        "id": {"type": "long"},
+        "with_children": {"type": "long"},
+        "current_timestamp": {"type": "text"},
+        "cnt_erroneous_data": {"type": "long"},
+        "cnt_short_stay": {"type": "long"},
+        "cnt_standard_stay": {"type": "long"},
+        "cnt_standard_extended_stay": {"type": "long"},
+        "cnt_long_stay": {"type": "long"},
+        "most_popular_stay_type": {"type": "text"},
+        "coords": {"type": "geo_point"}
+    }
+}
+es = Elasticsearch("http://localhost:9200")
+es.indices.create(index=index, mappings=mappings)
+
+query2 = df_with_coords.writeStream \
+    .outputMode("append") \
+    .queryName("writing_to_es") \
+    .format("org.elasticsearch.spark.sql.streaming") \
+    .option("checkpointLocation", "/tmp/") \
+    .option("es.resource", "elk") \
+    .option("es.nodes", "localhost") \
+    .start()
+
+query2.stop()
+# pandasDF = df_with_coords.toPandas()
+#
+# bulk_data = []
+# for i, row in pandasDF.iterrows():
+#     bulk_data.append(
+#         {
+#             "_index": "elk",
+#             "_id": i,
+#             "_source": {
+#                 "id": row["id"],
+#                 "with_children": row["with_children"],
+#                 "current_timestamp": row["current_timestamp"],
+#                 "cnt_erroneous_data": row["cnt_erroneous_data"],
+#                 "cnt_short_stay": row["cnt_short_stay"],
+#                 "cnt_standard_stay": row["cnt_standard_stay"],
+#                 "cnt_standard_extended_stay": row["cnt_standard_extended_stay"],
+#                 "cnt_long_stay": row["cnt_long_stay"],
+#                 "most_popular_stay_type": row["most_popular_stay_type"],
+#                 "coords": row["coords"],
+#             }
+#         }
+#     )
+# bulk(es, bulk_data)
+
+es.indices.refresh(index="elk")
+es.cat.count(index="elk", format="json")
+
+spark_elastic.stop()
