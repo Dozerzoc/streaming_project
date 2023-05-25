@@ -1,4 +1,4 @@
-from pyspark.sql.functions import udf, datediff, col, when, struct, lit, count, greatest, broadcast
+from pyspark.sql.functions import udf, datediff, col, when, lit, count, greatest, broadcast
 from pyspark.sql.types import *
 from operator import itemgetter
 import datetime
@@ -32,16 +32,6 @@ def join_initial(dataframe1, dataframe2):
     )
 
 
-def filter_by_temp(df):
-    """
-    This function filters dataframe by temperature
-    :param df:
-    :return: filtered dataframe
-    """
-    return df \
-        .filter(col('avg_tmpr_c') > 0)
-
-
 def add_stay_duration(df):
     """
     This function adds timestamp, stay duration and customer preferences columns
@@ -51,16 +41,13 @@ def add_stay_duration(df):
     :return: dataframe with filtered data
     """
     return df \
-        .withColumn("current_timestamp", when(lit(True),
-                                              lit(str(datetime.datetime.now().replace(second=0, microsecond=0))))) \
         .withColumn("stay_duration", (datediff(col('srch_co'), col('srch_ci')))) \
-        .withColumn("customer_preferences", when(lit(True), (
-        when(col("stay_duration") == 1, "Short stay")
-        .when(col("stay_duration").between(2, 7), "Standard stay")
-        .when(col("stay_duration").between(8, 14), "Standard extended stay")
-        .when(col("stay_duration").between(15, 29), "Long stay")
-        .otherwise("Erroneous data"))
-                                                 ))
+        .withColumn("customer_preferences",
+                    when(col("stay_duration") == 1, "Short stay")
+                    .when(col("stay_duration").between(2, 7), "Standard stay")
+                    .when(col("stay_duration").between(8, 14), "Standard extended stay")
+                    .when(col("stay_duration").between(15, 29), "Long stay")
+                    .otherwise("Erroneous data"))
 
 
 def aggregate_by_hotel_id(df):
@@ -71,17 +58,7 @@ def aggregate_by_hotel_id(df):
     :param df:
     :return: new dataframe with aggregated data
     """
-    df_schema = StructType([
-        StructField("hotel_id", LongType(), True),
-        StructField("Short stay", IntegerType(), True),
-        StructField("Standard stay", IntegerType(), True),
-        StructField("Standard extended stay", IntegerType(), True),
-        StructField("Long stay", IntegerType(), True),
-        StructField("Erroneous data", IntegerType(), True),
-        StructField("with_children", IntegerType(), True)
-    ])
-
-    output = df \
+    return df \
         .groupBy('hotel_id').agg(
         count(when(col('customer_preferences') == 'Short stay', col('hotel_id'))).cast('Integer').alias('Short stay'),
         count(when(col('customer_preferences') == 'Standard stay', col('hotel_id'))).cast('Integer').alias(
@@ -94,32 +71,25 @@ def aggregate_by_hotel_id(df):
         count(when(col('with_children') != 0, col('hotel_id'))).cast('Integer').alias('with_children')
     )
 
-    return output
-
 
 def get_most_popular_stay_type(df):
     """
     This function gets the most_popular_stay_type for each hotel according to the maximum number of customers
     and with_children column to distinguish between hotels with children and without children
     :param df:
-    :return: new dataframe with added columns: current_timestamp, most_popular_stay_type, with_children
+    :return: new dataframe with added columns: most_popular_stay_type, with_children
     """
+    gre = greatest(df['Short stay'], df['Standard stay'], df['Standard extended stay'], df['Long stay'],
+                   df['Erroneous data'])
     return df \
         .withColumn("most_popular_stay_type",
-                    when(greatest(df['Short stay'], df['Standard stay'], df['Standard extended stay'], df['Long stay'],
-                                  df['Erroneous data']) == df['Short stay'], "Short stay") \
-                    .when(greatest(df['Short stay'], df['Standard stay'], df['Standard extended stay'], df['Long stay'],
-                                   df['Erroneous data']) == df['Standard stay'], "Standard stay") \
-                    .when(greatest(df['Short stay'], df['Standard stay'], df['Standard extended stay'], df['Long stay'],
-                                   df['Erroneous data']) == df['Standard extended stay'], "Standard extended stay") \
-                    .when(greatest(df['Short stay'], df['Standard stay'], df['Standard extended stay'], df['Long stay'],
-                                   df['Erroneous data']) == df['Long stay'], "Long stay") \
+                    when(gre == df['Short stay'], "Short stay") \
+                    .when(gre == df['Standard stay'], "Standard stay") \
+                    .when(gre == df['Standard extended stay'], "Standard extended stay") \
+                    .when(gre == df['Long stay'], "Long stay") \
                     .otherwise("Erroneous data")) \
-        .withColumn('current_timestamp', when(lit(True),
-                                              lit(str(datetime.datetime.now().replace(second=0, microsecond=0))))) \
         .select('hotel_id',
                 'with_children',
-                'current_timestamp',
                 col('Erroneous data').alias('cnt_erroneous_data'),
                 col('Short stay').alias('cnt_short_stay'),
                 col('Standard stay').alias('cnt_standard_stay'),
@@ -140,7 +110,7 @@ def write_to_avro(df, epoch_id):
     df.write \
         .format("avro") \
         .mode("overwrite") \
-        .save("./datasets/hotels_aggregated")
+        .save("../datasets/hotels_aggregated")
 
 
 maxcol_schema = StructType([StructField('maxval', IntegerType()), StructField('most_popular_stay_type', StringType())])
