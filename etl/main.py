@@ -2,7 +2,7 @@ import datetime
 from elasticsearch import Elasticsearch
 import findspark
 from etl.functions import add_stay_duration, aggregate_by_hotel_id, \
-    get_most_popular_stay_type, write_to_avro, join_initial
+    get_most_popular_stay_type, write_to_avro, join_initial, es_create_index_if_not_exists
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, broadcast, window, lit
 from pyspark.sql.types import *
@@ -105,13 +105,20 @@ query.stop()
 
 
 es = Elasticsearch("http://localhost:9200")
-es.indices.create(index="elk")
+index = "elk"
+es_create_index_if_not_exists(es, index=index)
 
-df_to_elk = final_stream_df.withColumn("current_timestamp", lit(str(datetime.datetime.now())).cast(TimestampType()))
-df_with_watermark = df_to_elk.withWatermark("current_timestamp", "10 minutes")
-df_with_window = df_with_watermark.withColumn("window", window(col("current_timestamp"), "1 hour", "30 minutes"))
+windowedCounts = final_stream_df.withWatermark("current_timestamp", "100 milliseconds") \
+    .groupBy(window("current_timestamp", "2 microseconds", "1 microseconds"),
+             "cnt_erroneous_data",
+             "cnt_short_stay",
+             "cnt_standard_stay",
+             "cnt_standard_extended_stay",
+             "cnt_long_stay"
+             ) \
+    .count()
 
-query2 = df_with_window \
+query2 = windowedCounts \
     .writeStream \
     .format("org.elasticsearch.spark.sql") \
     .option("truncate", False) \
@@ -125,7 +132,5 @@ query2 = df_with_window \
 query2.awaitTermination(20)
 query2.processAllAvailable()
 query2.stop()
-
-# org.elasticsearch.spark.sql.streaming
 
 spark.stop()

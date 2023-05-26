@@ -1,3 +1,4 @@
+import elasticsearch
 from pyspark.sql.functions import udf, datediff, col, when, lit, count, greatest, broadcast
 from pyspark.sql.types import *
 from operator import itemgetter
@@ -107,6 +108,7 @@ def write_to_avro(df, epoch_id):
     :param epoch_id: this is the microbatch id that is provided by Spark foreachBatch
     :return: microbatch data is written to avro format
     """
+    df = df.withColumn("current_timestamp", lit(str(datetime.datetime.now().isoformat())).cast("Timestamp"))
     df.write \
         .format("avro") \
         .mode("overwrite") \
@@ -115,3 +117,28 @@ def write_to_avro(df, epoch_id):
 
 maxcol_schema = StructType([StructField('maxval', IntegerType()), StructField('most_popular_stay_type', StringType())])
 maxcol = udf(lambda row: max(row, key=itemgetter(0)), maxcol_schema)
+
+
+def es_create_index_if_not_exists(es, index):
+    """Create the given ElasticSearch index and ignore error if it already exists"""
+    try:
+        es.indices.create(index)
+    except elasticsearch.exceptions.RequestError as ex:
+        if ex.error == 'resource_already_exists_exception':
+            pass # Index already exists. Ignore.
+        else: # Other exception - raise it
+            raise ex
+
+
+# PUT elk/
+#
+# {
+#   "mappings" : {
+#     "properties" : {
+#       "current_timestamp" : {
+#         "type" : "date",
+#         "format": "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"
+#         }
+#       }
+#     }
+#   }

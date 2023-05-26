@@ -1,7 +1,8 @@
 import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, window, lit
-from pyspark.sql.types import StructType, StructField, LongType, StringType, IntegerType, DoubleType
+from pyspark.sql.types import StructType, StructField, LongType, StringType, IntegerType, DoubleType, DateType, \
+    TimestampType
 
 # Create a SparkSession
 spark = SparkSession.builder \
@@ -25,8 +26,8 @@ stream_schema = StructType([
     StructField('cnt_standard_stay', IntegerType(), True),
     StructField('cnt_standard_extended_stay', IntegerType(), True),
     StructField('cnt_long_stay', IntegerType(), True),
-    StructField('most_popular_stay_type', StringType(), False)
-
+    StructField('most_popular_stay_type', StringType(), False),
+    StructField('current_timestamp', TimestampType(), True)
 ])
 
 df = spark \
@@ -34,15 +35,23 @@ df = spark \
     .format("avro") \
     .schema(stream_schema) \
     .load('../datasets/hotels_aggregated')
+#
+windowedCounts = df.withWatermark("current_timestamp", "100 milliseconds") \
+    .groupBy(window("current_timestamp", "2 microseconds", "1 microseconds"),
+             "cnt_erroneous_data",
+             "cnt_short_stay",
+             "cnt_standard_stay",
+             "cnt_standard_extended_stay",
+             "cnt_long_stay"
+             ) \
+    .count()
 
-df = df.withColumn("current_timestamp", lit(str(datetime.datetime.now())).cast("timestamp"))
-df_with_watermark = df.withWatermark("current_timestamp", "10 seconds")
-df_with_window = df_with_watermark.withColumn("window", window(col("current_timestamp"), "1 minute", "30 seconds"))
-query = df_with_window \
+
+query = windowedCounts \
     .writeStream \
     .format("console") \
     .option("truncate", False) \
-    .outputMode("append") \
+    .outputMode("update") \
     .start()
 
 query.awaitTermination(20)
