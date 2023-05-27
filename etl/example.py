@@ -36,8 +36,8 @@ df = spark \
     .schema(stream_schema) \
     .load('../datasets/hotels_aggregated')
 #
-windowedCounts = df.withWatermark("current_timestamp", "100 milliseconds") \
-    .groupBy(window("current_timestamp", "2 microseconds", "1 microseconds"),
+windowedCounts = df.withWatermark("current_timestamp", "1 minute") \
+    .groupBy(window("current_timestamp", "2 seconds", "1 seconds"),
              "cnt_erroneous_data",
              "cnt_short_stay",
              "cnt_standard_stay",
@@ -51,6 +51,7 @@ query = windowedCounts \
     .writeStream \
     .format("console") \
     .option("truncate", False) \
+    .option("timestampFormat", "yyyy-MM-dd'T'HH:mm:ss.SSS")\
     .outputMode("update") \
     .start()
 

@@ -1,10 +1,9 @@
-import datetime
 from elasticsearch import Elasticsearch
 import findspark
 from etl.functions import add_stay_duration, aggregate_by_hotel_id, \
     get_most_popular_stay_type, write_to_avro, join_initial, es_create_index_if_not_exists
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, broadcast, window, lit
+from pyspark.sql.functions import col, broadcast, window
 from pyspark.sql.types import *
 
 findspark.init()
@@ -13,7 +12,7 @@ spark = SparkSession.builder \
     .master("local[*]") \
     .appName('spark-batch-processing') \
     .config("spark.jars.packages",
-            "org.apache.spark:spark-avro_2.12:3.2.3") \
+            "org.apache.spark:spark-avro_2.12:3.2.0") \
     .config("spark.es.index.auto.create", "true") \
     .config("spark.es.nodes.wan.only", "true") \
     .config("spark.driver.memory", "15g") \
@@ -108,8 +107,26 @@ es = Elasticsearch("http://localhost:9200")
 index = "elk"
 es_create_index_if_not_exists(es, index=index)
 
-windowedCounts = final_stream_df.withWatermark("current_timestamp", "100 milliseconds") \
-    .groupBy(window("current_timestamp", "2 microseconds", "1 microseconds"),
+schema = StructType([
+    StructField('hotel_id', LongType(), True),
+    StructField('with_children', IntegerType(), True),
+    StructField('cnt_erroneous_data', IntegerType(), True),
+    StructField('cnt_short_stay', IntegerType(), True),
+    StructField('cnt_standard_stay', IntegerType(), True),
+    StructField('cnt_standard_extended_stay', IntegerType(), True),
+    StructField('cnt_long_stay', IntegerType(), True),
+    StructField('most_popular_stay_type', StringType(), False),
+    StructField('current_timestamp', TimestampType(), True)
+])
+
+df_elastic = spark \
+    .readStream \
+    .format("avro") \
+    .schema(schema) \
+    .load('../datasets/hotels_aggregated')
+
+windowedCounts = df_elastic.withWatermark("current_timestamp", "1 minute") \
+    .groupBy(window("current_timestamp", "2 seconds", "1 seconds"),
              "cnt_erroneous_data",
              "cnt_short_stay",
              "cnt_standard_stay",
@@ -126,11 +143,13 @@ query2 = windowedCounts \
     .option("es.nodes", "localhost") \
     .option("es.port", "9200") \
     .option("checkpointLocation", "/tmp") \
-    .option("es.resource", "elk") \
-    .start()
+    .option("timestampFormat", "yyyy-MM-dd'T'HH:mm:ss.SSS")\
+    .start("elk") \
+    .awaitTermination(20)
 
-query2.awaitTermination(20)
-query2.processAllAvailable()
+
+# query2.awaitTermination()
 query2.stop()
+query2.processAllAvailable()
 
 spark.stop()
