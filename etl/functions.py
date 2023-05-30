@@ -1,9 +1,8 @@
-import elasticsearch
-from pyspark.sql.functions import udf, datediff, col, when, lit, count, greatest, broadcast, window
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import udf, datediff, col, when, lit, count, greatest, broadcast, current_timestamp, window, \
+    date_format
 from pyspark.sql.types import *
 from operator import itemgetter
-import datetime
-
 
 def set_condition(dataframe1, dataframe2):
     """
@@ -29,7 +28,8 @@ def join_initial(dataframe1, dataframe2):
         'avg_tmpr_c',
         'srch_ci',
         'srch_co',
-        col('srch_children_cnt').alias('with_children')
+        col('srch_children_cnt').alias('with_children'),
+        'date_time'
     )
 
 
@@ -60,7 +60,7 @@ def aggregate_by_hotel_id(df):
     :return: new dataframe with aggregated data
     """
     return df \
-        .groupBy('hotel_id').agg(
+        .groupBy(window('date_time', '10 seconds').alias('date_time'), 'hotel_id', 'name').agg(
         count(when(col('customer_preferences') == 'Short stay', col('hotel_id'))).cast('Integer').alias('Short stay'),
         count(when(col('customer_preferences') == 'Standard stay', col('hotel_id'))).cast('Integer').alias(
             'Standard stay'),
@@ -69,11 +69,10 @@ def aggregate_by_hotel_id(df):
         count(when(col('customer_preferences') == 'Long stay', col('hotel_id'))).cast('Integer').alias('Long stay'),
         count(when(col('customer_preferences') == 'Erroneous data', col('hotel_id'))).cast('Integer').alias(
             'Erroneous data'),
-        count(when(col('with_children') != 0, col('hotel_id'))).cast('Integer').alias('with_children')
-    )
+        count(when(col('with_children') != 0, col('hotel_id'))).cast('Integer').alias('with_children'))
 
 
-def get_most_popular_stay_type(df):
+def get_most_popular_stay_type_batch(df):
     """
     This function gets the most_popular_stay_type for each hotel according to the maximum number of customers
     and with_children column to distinguish between hotels with children and without children
@@ -82,6 +81,7 @@ def get_most_popular_stay_type(df):
     """
     gre = greatest(df['Short stay'], df['Standard stay'], df['Standard extended stay'], df['Long stay'],
                    df['Erroneous data'])
+
     return df \
         .withColumn("most_popular_stay_type",
                     when(gre == df['Short stay'], "Short stay") \
@@ -89,14 +89,43 @@ def get_most_popular_stay_type(df):
                     .when(gre == df['Standard extended stay'], "Standard extended stay") \
                     .when(gre == df['Long stay'], "Long stay") \
                     .otherwise("Erroneous data")) \
-        .select('hotel_id',
-                'with_children',
+        .select('name',
                 col('Erroneous data').alias('cnt_erroneous_data'),
                 col('Short stay').alias('cnt_short_stay'),
                 col('Standard stay').alias('cnt_standard_stay'),
                 col('Standard extended stay').alias('cnt_standard_extended_stay'),
                 col('Long stay').alias('cnt_long_stay'),
+                col('with_children').alias('cnt_with_children'),
                 'most_popular_stay_type'
+                )
+
+def get_most_popular_stay_type_stream(df):
+    """
+    This function gets the most_popular_stay_type for each hotel according to the maximum number of customers
+    and with_children column to distinguish between hotels with children and without children
+    :param df:
+    :return: new dataframe with added columns: most_popular_stay_type, with_children
+    """
+    gre = greatest(df['Short stay'], df['Standard stay'], df['Standard extended stay'], df['Long stay'],
+                   df['Erroneous data'])
+
+    return df \
+        .withColumn("most_popular_stay_type",
+                    when(gre == df['Short stay'], "Short stay") \
+                    .when(gre == df['Standard stay'], "Standard stay") \
+                    .when(gre == df['Standard extended stay'], "Standard extended stay") \
+                    .when(gre == df['Long stay'], "Long stay") \
+                    .otherwise("Erroneous data")) \
+        .select('name',
+                col('Erroneous data').alias('cnt_erroneous_data'),
+                col('Short stay').alias('cnt_short_stay'),
+                col('Standard stay').alias('cnt_standard_stay'),
+                col('Standard extended stay').alias('cnt_standard_extended_stay'),
+                col('Long stay').alias('cnt_long_stay'),
+                col('with_children').alias('cnt_with_children'),
+                'most_popular_stay_type',
+                'start',
+                'end'
                 )
 
 
@@ -108,7 +137,6 @@ def write_to_avro(df, epoch_id):
     :param epoch_id: this is the microbatch id that is provided by Spark foreachBatch
     :return: microbatch data is written to avro format
     """
-    df = df.withColumn("current_timestamp", lit(str(datetime.datetime.now().isoformat())).cast("Timestamp"))
     df.write \
         .format("avro") \
         .mode("overwrite") \
@@ -117,28 +145,3 @@ def write_to_avro(df, epoch_id):
 
 maxcol_schema = StructType([StructField('maxval', IntegerType()), StructField('most_popular_stay_type', StringType())])
 maxcol = udf(lambda row: max(row, key=itemgetter(0)), maxcol_schema)
-
-
-def es_create_index_if_not_exists(es, index):
-    """Create the given ElasticSearch index and ignore error if it already exists"""
-    try:
-        es.indices.create(index)
-    except elasticsearch.exceptions.RequestError as ex:
-        if ex.error == 'resource_already_exists_exception':
-            pass # Index already exists. Ignore.
-        else: # Other exception - raise it
-            raise ex
-
-
-# PUT elk/
-#
-# {
-#   "mappings" : {
-#     "properties" : {
-#       "current_timestamp" : {
-#         "type" : "date",
-#         "format": "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"
-#         }
-#       }
-#     }
-#   }
